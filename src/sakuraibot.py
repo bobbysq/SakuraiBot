@@ -576,9 +576,9 @@ class SakuraiBot:
         r.login(self.username, config['Passwords']['reddit'])
         self.logger.info("Logged into Reddit.")
 
-        title = " approaching! " \
+        title = "{description} approaching! " \
                 "{name} confirmed for Super Smash Bros. 4!" \
-            .format(name=new_char.name)
+            .format(name=new_char.name, description=new_char.description)
 
         comment = "[An album of all previous daily SSB4 pictures posted by " \
                   "Sakurai.](http://imgur.com/a/{album})\n\n" \
