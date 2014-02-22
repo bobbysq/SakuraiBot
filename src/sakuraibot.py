@@ -4,7 +4,7 @@ Main functions of the Reddit bot.
 
 Fetches Miiverse posts by Smash Bros creator Sakurai.
 Created on 2013-06-14
-Author: Wiwiweb, modified by bobbysq
+Author: Wiwiweb
 
 """
 
@@ -17,7 +17,7 @@ from random import randint
 import re
 from time import sleep
 
-import bs4
+from bs4 import BeautifulSoup
 import praw
 import requests
 from uuid import uuid4
@@ -28,7 +28,7 @@ config = ConfigParser()
 config.read([CONFIG_FILE, CONFIG_FILE_PRIVATE])
 
 VERSION = "2.5"
-USER_AGENT = "SakuraiBot v" + VERSION + " by /u/Wiwiweb for /r/smashbros, being run by /u/bobbysq using /u/gfykitten"
+USER_AGENT = "SakuraiBot v" + VERSION + " by /u/Wiwiweb for /r/smashbros"
 
 LAST_PICTURE_MD5_FILENAME = "../res/last-picture-md5.txt"
 LAST_CHAR_FILENAME = "../res/last-char.txt"
@@ -36,7 +36,7 @@ SAKURAI_BABBLES_FILENAME = "../res/sakurai-babbles.txt"
 
 MIIVERSE_URL = "https://miiverse.nintendo.net"
 MIIVERSE_CALLBACK_URL = "https://miiverse.nintendo.net/auth/callback"
-MIIVERSE_DEV_PAGE = "/titles/14866558073037299863/14866558073037300685" #this might be different for me, since I live in US
+MIIVERSE_DEV_PAGE = "/titles/14866558073037299863/14866558073037300685"
 MIIVERSE_DEV_PAGE_JP = "/titles/14866558073037273112/14866558073037275469"
 NINTENDO_LOGIN_PAGE = "https://id.nintendo.net/oauth/authorize"
 SMASH_WEBPAGE = "http://www.smashbros.com/en-uk/"
@@ -499,7 +499,7 @@ class SakuraiBot:
                                 + post_details.picture + ") |")
         else:
             original_picture = ''
-        album_link = ("[\(my\) Pic of the Day album](http://imgur.com/a/"
+        album_link = ("[Pic of the Day album](http://imgur.com/a/"
                       + self.imgur_album + ")")
         self.logger.info("filename: " + self.extra_comment_filename)
         f = open(self.extra_comment_filename, 'r+')
@@ -527,11 +527,10 @@ class SakuraiBot:
             new_char_text = ''
 
         if post_details.extra_author is not None:
-            extra_text = post_details.extra_comment.replace("\r\n", "  \n")
             bonus_post = "**Extra {author} post in Miiverse's comments!**" \
                          "  \n>{text}" \
                 .format(author=post_details.extra_author,
-                        text=extra_text)
+                        text=post_details.extra_comment)
             if post_details.extra_picture is not None:
                 bonus_post += "\n\n[Extra picture]({})" \
                     .format(post_details.extra_picture)
@@ -593,7 +592,7 @@ class SakuraiBot:
         for subreddit in self.other_subreddits:
             while True:
                 try:
-                    submission = r.submit(subreddit, new_char.description + title,
+                    submission = r.submit(subreddit, title,
                                           url=SMASH_CHARACTER_PAGE
                                           .format(new_char.char_id))
                     self.logger.info(
