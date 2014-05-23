@@ -15,17 +15,15 @@ import logging
 from os import remove
 from shutil import copy
 import sys
-from time import sleep
 
 import praw
 import unittest
 import pep8
-import pep257
-from praw.objects import Submission
 import requests
 from uuid import uuid4
 
 import sakuraibot
+from sakuraibot import ExtraPost
 
 CONFIG_FILE = "../cfg/config.ini"
 CONFIG_FILE_PRIVATE = "../cfg/config-private.ini"
@@ -34,9 +32,8 @@ config.read([CONFIG_FILE, CONFIG_FILE_PRIVATE])
 
 USER_AGENT = "SakuraiBot test suite"
 
-REDDIT_PASSWORD_FILENAME = '../res/private/reddit-password.txt'
 LAST_POST_FILENAME = 'last-post.txt'
-EXTRA_COMMENT_FILENAME = 'extra-comment.txt'
+EXTRA_COMMENT_FILENAME = '../res/extra-comment.txt'
 PICTURE_MD5_FILENAME = 'last-picture-md5.txt'
 LAST_CHAR_FILENAME = 'last-char.txt'
 IMGUR_CLIENT_ID = '45b2e3810d7d550'
@@ -59,11 +56,6 @@ class CodeFormatTests(unittest.TestCase):
         result = pep8style.check_files(['../src/sakuraibot.py',
                                         '../src/__init__.py', 'tests.py'])
         self.assertFalse(result.total_errors, result.messages)
-
-    def test_pep257_conformance(self):
-        result = pep257.check_files(['../src/sakuraibot.py',
-                                     '../src/__init__.py', 'tests.py'])
-        self.assertFalse(result)
 
 
 class BasicTests(unittest.TestCase):
@@ -165,9 +157,7 @@ class MiiverseTests(unittest.TestCase):
         self.assertIsNone(info.picture)
         self.assertIsNone(info.video)
         self.assertIsNone(info.smashbros_pic)
-        self.assertIsNone(info.extra_author)
-        self.assertIsNone(info.extra_picture)
-        self.assertIsNone(info.extra_comment)
+        self.assertFalse(info.extra_posts)
 
     def test_get_info_from_post_picture(self):
         url = '/posts/AYMHAAABAABtUV58IEIGrA'
@@ -184,16 +174,14 @@ class MiiverseTests(unittest.TestCase):
         self.assertEqual(info.picture, picture)
         self.assertIsNone(info.video)
         self.assertIsNone(info.smashbros_pic)
-        self.assertIsNone(info.extra_author)
-        self.assertIsNone(info.extra_picture)
-        self.assertIsNone(info.extra_comment)
+        self.assertFalse(info.extra_posts)
 
     def test_get_info_from_post_video(self):
         url = '/posts/AYMHAAABAADMUKlXokfF0g'
         text = ("The long-awaited super robot Mega Man joins the battle!\r\n"
                 "He fights using the various weapons"
                 " he acquired from bosses in past games.")
-        video = 'http://www.youtube.com/watch?v=aX2KNyaoNV4'
+        video = 'https://www.youtube.com/watch?v=aX2KNyaoNV4'
 
         info = self.sbot.get_info_from_post(url, self.cookie)
         self.assertTrue(info.is_video_post())
@@ -204,9 +192,7 @@ class MiiverseTests(unittest.TestCase):
         self.assertIsNone(info.picture)
         self.assertEqual(info.video, video)
         self.assertIsNone(info.smashbros_pic)
-        self.assertIsNone(info.extra_author)
-        self.assertIsNone(info.extra_picture)
-        self.assertIsNone(info.extra_comment)
+        self.assertFalse(info.extra_posts)
 
     def test_get_info_from_post_extra_picture(self):
         url = '/posts/AYMHAAACAABnUYnYdfxmSw'
@@ -228,9 +214,60 @@ class MiiverseTests(unittest.TestCase):
         self.assertTrue(isinstance(info.author, str))
         self.assertEqual(info.text, text)
         self.assertEqual(info.picture, picture)
-        self.assertEqual(info.extra_author, 'Sakurai')
-        self.assertEqual(info.extra_picture, extra_picture)
-        self.assertEqual(info.extra_comment, extra_text)
+        self.assertEqual(info.extra_posts[0].author, 'Sakurai')
+        self.assertEqual(info.extra_posts[0].picture, extra_picture)
+        self.assertEqual(info.extra_posts[0].text, extra_text)
+        self.assertIsNone(info.video)
+        self.assertIsNone(info.smashbros_pic)
+
+    def test_get_info_from_post_multiple_extra_pictures(self):
+        url = '/posts/AYMHAAACAADMUKloUYDezQ'
+        text = ("Pic of the day. "
+                "Here's some info on the Nintendo 3DS stage "
+                "called Super Mario 3D Land! "
+                "First, it advances by side-scrolling…")
+        picture = 'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzRpCLAEzC-LqC4'
+
+        extra_text1 = ("Then you continue into the valley--it's in 3D Land, "
+                       "after all. The protruding stone blocks change "
+                       "the angles of the platforms.")
+        extra_picture1 = \
+            'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzRpCLfEXjgpdwk'
+        extra_post1 = ExtraPost('Sakurai', extra_text1, extra_picture1)
+
+        extra_text2 = ("After that, back to side-scrolling. Now it gets "
+                       "you moving--you'll have to trot downhill here.")
+        extra_picture2 = \
+            'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzRpCLsc42ZpA7g'
+        extra_post2 = ExtraPost('Sakurai', extra_text2, extra_picture2)
+
+        extra_text3 = ("And finally, you get back on rails to go farther into "
+                       "the stage. It takes roughly two minutes to complete a "
+                       "lap, and at the end you go into a giant pipe that "
+                       "takes you back to the beginning. …I know this "
+                       "sequence goes above and beyond a traditional "
+                       "Pic of the Day, so consider this a little something "
+                       "extra on the side from me.")
+        extra_picture3 = \
+            'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzRpCMHYUiQh7v1'
+        extra_post3 = ExtraPost('Sakurai', extra_text3, extra_picture3)
+
+        extra_posts = [extra_post1, extra_post2, extra_post3]
+
+        info = self.sbot.get_info_from_post(url, self.cookie)
+        self.assertTrue(info.is_picture_post())
+        self.assertEqual(info.author, 'Sakurai')
+        self.assertTrue(isinstance(info.text, str))  # Not unicode
+        self.assertTrue(isinstance(info.author, str))
+        self.assertEqual(info.text, text)
+        self.assertEqual(info.picture, picture)
+        for i in range(0, 2):
+            self.assertEqual(info.extra_posts[i].author,
+                             extra_posts[i].author)
+            self.assertEqual(info.extra_posts[i].picture,
+                             extra_posts[i].picture)
+            self.assertEqual(info.extra_posts[i].text,
+                             extra_posts[i].text)
         self.assertIsNone(info.video)
         self.assertIsNone(info.smashbros_pic)
 
@@ -329,7 +366,7 @@ class RedditTests(unittest.TestCase):
         title = 'New Pug post! (' + date + ') "' \
                 + unique_text + '" (No picture)'
         self.assertEqual(title, submission.title)
-        #TODO test comment
+        # TODO test comment
 
     def test_post_to_reddit_text_long(self):
         unique_text = 'Long text test: ' + str(uuid4()) + \
@@ -364,7 +401,7 @@ class RedditTests(unittest.TestCase):
         title = 'New Pug picture! (' + date + ') "' + unique_text + '"'
         self.assertEqual(title, submission.title)
         self.assertEqual(picture, submission.url)
-        #TODO test comment
+        # TODO test comment
 
     def test_post_to_reddit_picture_long(self):
         unique = uuid4()
@@ -389,17 +426,27 @@ class RedditTests(unittest.TestCase):
         comment = submission.comments[0].body
         self.assertTrue(unique_text in comment)
 
-    def test_post_to_reddit_extra_picture(self):
+    def test_post_to_reddit_extra_pictures(self):
         unique = uuid4()
         picture = 'http://i.imgur.com/uQIRrD2.gif?unique=' + str(unique)
         unique_text = 'Picture test: ' + str(unique) + \
                       unicode_text
-        unique_extra_text = 'Extra text test: ' + str(unique) + \
-                            unicode_text
+
+        unique_extra_text1 = 'Extra text 1 test: ' + str(unique) + \
+            unicode_text
+        extra_post1 = ExtraPost('Pug1', unique_extra_text1, picture)
+        unique_extra_text2 = 'Extra text 2 test: ' + str(unique) + \
+            unicode_text
+        extra_post2 = ExtraPost('Pug2', unique_extra_text2, picture)
+        unique_extra_text3 = 'Extra text 3 test: ' + str(unique) + \
+            unicode_text
+        extra_post3 = ExtraPost('Pug2', unique_extra_text3, picture)
+
+        extra_posts = [extra_post1, extra_post2, extra_post3]
+
         post_details = \
             sakuraibot.PostDetails('Pug', unique_text,
-                                   picture, None, picture,
-                                   'Pug', unique_extra_text, picture)
+                                   picture, None, picture, extra_posts)
         submission = self.sbot.post_to_reddit(post_details, None)
         self.assertEqual(submission,
                          next(self.subreddit.get_new(limit=1)))
@@ -412,8 +459,12 @@ class RedditTests(unittest.TestCase):
         # Reload comments
         submission = next(self.subreddit.get_new(limit=1))
         comment = submission.comments[0].body
-        self.assertTrue("Extra Pug post in Miiverse's comments!" in comment)
-        self.assertTrue(unique_extra_text in comment)
+        self.assertTrue("Extra Pug1 post in Miiverse's comments!" in comment)
+        self.assertTrue("Extra Pug2 post in Miiverse's comments!" in comment)
+        self.assertTrue(comment.count('Pug2') == 1)
+        self.assertTrue(unique_extra_text1 in comment)
+        self.assertTrue(unique_extra_text2 in comment)
+        self.assertTrue(unique_extra_text3 in comment)
         self.assertTrue(picture in comment)
 
     def test_post_to_reddit_video(self):
@@ -433,7 +484,7 @@ class RedditTests(unittest.TestCase):
         title = 'New Pug video! (' + date + ') "' + unique_text + '"'
         self.assertEqual(title, submission.title)
         self.assertEqual(video, submission.url)
-        #TODO test comment
+        # TODO test comment
 
     def test_post_to_reddit_character(self):
         unique = uuid4()
@@ -453,7 +504,7 @@ class RedditTests(unittest.TestCase):
                 + '"'
         self.assertEqual(title, submission.title)
         self.assertEqual(picture, submission.url)
-        #TODO test comment
+        # TODO test comment
 
     def test_post_to_other_subreddits(self):
         unique = uuid4()
@@ -484,7 +535,7 @@ class CompleteTests(unittest.TestCase):
 
     def test_bot_cycle(self):
         self.sbot.bot_cycle()
-        #TODO: asserts
+        # TODO: asserts
 
 
 if __name__ == '__main__':

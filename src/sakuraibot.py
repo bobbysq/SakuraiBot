@@ -13,9 +13,11 @@ from configparser import ConfigParser
 from datetime import datetime
 import hashlib
 from logging import getLogger
+import os
 from random import randint
 import re
 from time import sleep
+
 
 from bs4 import BeautifulSoup
 import praw
@@ -49,6 +51,8 @@ IMGUR_REARRANGE_URL = "http://imgur.com/ajaxalbums/rearrange/{}"
 IMGUR_ALBUM_IMAGES_URL = "https://api.imgur.com/3/album/{}/images"
 
 NEW_CHAR_REGEX = r'The introduction for (.+), (.+), is now available\.'
+YOUTUBE_REGEX = \
+    r'https://www\.youtube\.com/embed/(.{11})\?rel=0&modestbranding=1'
 
 REDDIT_TITLE_LIMIT = 300
 IMGUR_TITLE_LIMIT = 128
@@ -62,15 +66,16 @@ f.close()
 
 class PostDetails:
     def __init__(self, author, text, picture, video, smashbros_pic=None,
-                 extra_author=None, extra_comment=None, extra_picture=None):
+                 extra_posts=None):
         self.author = author
         self.text = text
         self.picture = picture
         self.video = video
         self.smashbros_pic = smashbros_pic
-        self.extra_author = extra_author
-        self.extra_comment = extra_comment
-        self.extra_picture = extra_picture
+        if extra_posts is None:
+            self.extra_posts = []
+        else:
+            self.extra_posts = extra_posts
 
     def is_text_post(self):
         return self.picture is None and self.video is None
@@ -80,6 +85,13 @@ class PostDetails:
 
     def is_video_post(self):
         return self.video is not None
+
+
+class ExtraPost:
+    def __init__(self, author, text, picture):
+        self.author = author
+        self.text = text
+        self.picture = picture
 
 
 class CharDetails:
@@ -116,6 +128,9 @@ class SakuraiBot:
                       'password': config['Passwords']['miiverse']}
         self.logger.debug("Parameters: " + str(parameters))
         req = requests.post(NINTENDO_LOGIN_PAGE, data=parameters)
+        if len(req.history) < 2:
+            self.logger.debug("Page: " + req.text)
+            raise Exception("Couldn't retrieve miiverse cookie.")
         miiverse_cookie = req.history[1].cookies.get('ms')
         if miiverse_cookie is None:
             self.logger.debug("Page: " + req.text)
@@ -148,19 +163,20 @@ class SakuraiBot:
     def is_new_post(self, post_url):
         """Compare the latest post URL to the ones we already processed."""
         postf = open(self.last_post_filename, 'r')
+        lines = postf.readlines()
+        postf.close()
 
-        # We have to check 50 posts, because sometimes Miiverse will mess up
+        # We have to check all posts, because sometimes Miiverse will mess up
         # the order and we might think it's a new post even though it's not.
-        for _ in range(49):  # Only 50 posts on the first page.
-            seen_post = postf.readline().strip()
+        # Apparently it's not limited to the first page, so 50 isn't enough.
+        for line in lines:
+            seen_post = line.strip()
             if seen_post == post_url:
-                postf.close()
                 self.logger.info("Post was already posted")
                 return False
             elif not seen_post:  # No more lines.
                 break
 
-        postf.close()
         self.logger.info("Post is new!")
         return True
 
@@ -178,6 +194,7 @@ class SakuraiBot:
         f = open(self.picture_md5_filename, 'r')
         last_md5 = f.read().strip()
         f.close()
+        self.logger.debug("last_md5: " + last_md5)
 
         if current_md5 == last_md5:
             self.logger.info("Same website picture as before.")
@@ -238,8 +255,9 @@ class SakuraiBot:
         elif 'video' in screenshot_container['class']:
             # Video post
             picture_url = None
-            video_url = soup.find('p', class_='url-link') \
-                .find('a').get('href')
+            embed_url = screenshot_container.find('iframe').get('src')
+            video_id = re.match(YOUTUBE_REGEX, embed_url).group(1)
+            video_url = 'https://www.youtube.com/watch?v=' + video_id
             self.logger.info("Post video: " + video_url)
         else:
             # Picture post
@@ -248,40 +266,46 @@ class SakuraiBot:
             self.logger.info("Post picture: " + picture_url)
 
         # Check for extra image in comments
-        extra_post = soup.find('li', class_='official-user')
-        if extra_post is not None:
-            self.logger.info("Found an extra post!")
-            extra_author = \
-                extra_post.find('p', class_='user-name').find('a').get_text()
-            self.logger.info("Extra post author: " + extra_author)
-            extra_text = extra_post.find('p', class_='reply-content-text') \
-                .get_text().strip()
-            self.logger.info("Extra post text: " + extra_text)
-            extra_screenshot_container = \
-                extra_post.find('div', class_='screenshot-container')
-            if extra_screenshot_container is not None:
-                extra_picture = \
-                    extra_screenshot_container.find('img').get('src')
-                self.logger.info("Extra picture: " + extra_picture)
-            else:
-                extra_picture = None
-                self.logger.info("No extra picture.")
+        extra_posts_soup = soup.find_all('li', class_='official-user')
+        extra_posts = []
+        if extra_posts_soup:
+            for extra_post in extra_posts_soup:
+                self.logger.info("Found an extra post!")
+                extra_author = extra_post.find('p', class_='user-name') \
+                    .find('a').get_text()
+                self.logger.info("Extra post author: " + extra_author)
+                extra_text = \
+                    extra_post.find('p', class_='reply-content-text') \
+                    .get_text().strip()
+                self.logger.info("Extra post text: " + extra_text)
+                extra_screenshot_container = \
+                    extra_post.find('div', class_='screenshot-container')
+                if extra_screenshot_container is not None:
+                    extra_picture = \
+                        extra_screenshot_container.find('img').get('src')
+                    self.logger.info("Extra picture: " + extra_picture)
+                else:
+                    self.logger.info("No extra picture.")
+                    extra_picture = None
+                extra_posts.append(
+                    ExtraPost(extra_author, extra_text, extra_picture))
         else:
             self.logger.info("No extra post found.")
-            extra_author = None
-            extra_text = None
-            extra_picture = None
 
         return PostDetails(author, text, picture_url, video_url, None,
-                           extra_author, extra_text, extra_picture)
+                           extra_posts)
 
-    def upload_to_imgur(self, post_details):
+    def upload_to_imgur(self, post_details, website_give_up=False):
         """Upload the picture to imgur and returns the link."""
 
         # Get image base64 data
         # We could send the url to imgur directly
         # but sometimes imgur will not see the same image
-        req = requests.get(SMASH_DAILY_PIC)
+        if not website_give_up:
+            picture = SMASH_DAILY_PIC
+        else:
+            picture = post_details.picture
+        req = requests.get(picture)
         pic_base64 = b64encode(req.content)
 
         retries = 5
@@ -403,13 +427,15 @@ class SakuraiBot:
         return sakurai_babbles[rint]
 
     def post_to_reddit(self, post_details, new_char=None,
-                       post_url=None, post_url_jp=None):
+                       post_url=None, post_url_jp=None,
+                       website_give_up=False):
         """Post the Miiverse post to subreddit and returns the submission."""
         r = praw.Reddit(user_agent=USER_AGENT)
         r.login(self.username, config['Passwords']['reddit'])
         self.logger.info("Logged into Reddit.")
 
-        date = datetime.utcnow().strftime(config['Main']['date_format'])
+        date_format = config['Main']['date_format']
+        date = datetime.utcnow().strftime(date_format)
         author = post_details.author
         if new_char:
             title_format = "" + new_char.description + " approaching! (" + \
@@ -482,40 +508,52 @@ class SakuraiBot:
 
         # Additional comment
         comment = '{full_text}\n\n' \
+                  '{website_give_up_text}\n\n' \
                   '{original_picture} {album_link}\n\n' \
                   '{miiverse_links}\n\n' \
                   '{new_char}\n\n' \
-                  '{bonus_post}\n\n' \
+                  '{bonus_posts}\n\n' \
                   '{extra_comment}'
+        full_text = ''
         if text_too_long:
             # Reddit formatting
             reddit_text = post_details.text.replace("\r\n", "  \n")
             full_text = "Full text:  \n>" + reddit_text
             self.logger.info("Text too long. Added to comment.")
-        else:
-            full_text = ''
-        if post_details.picture is not None:
+
+        website_give_up_text = ''
+        if website_give_up:
+            website_give_up_text = \
+                ("The Smash Bros website did not update in time, "
+                 "so today's link is the lower-quality Miiverse picture. "
+                 "The high quality picture will eventually appear "
+                 "[here.](http://www.smashbros.com/update/images/daily.jpg)")
+
+        original_picture = ''
+        if post_details.picture:
             original_picture = ("[Original Miiverse picture]("
                                 + post_details.picture + ") |")
-        else:
-            original_picture = ''
+
         album_link = ("[Pic of the Day album](http://imgur.com/a/"
                       + self.imgur_album + ")")
         self.logger.info("filename: " + self.extra_comment_filename)
         f = open(self.extra_comment_filename, 'r+')
         extra_comment = f.read().strip()
-        self.logger.info("comment: " + extra_comment)
+        if len(extra_comment) > 0:
+            extra_comment = "***** \n\n" + extra_comment
+            self.logger.info("comment: " + extra_comment)
         if not self.debug:
             f.truncate(0)  # Erase file
         f.close()
 
-        if post_url is not None and post_url_jp is not None:
+        if post_url and post_url_jp:
             miiverse_links = "[Miiverse post]({}) | " \
                              "[Miiverse Japanese post]({})" \
                 .format(MIIVERSE_URL + post_url, MIIVERSE_URL + post_url_jp)
         else:
             miiverse_links = ''
 
+        new_char_text = ''
         if new_char:
             new_char_text = (
                 "**[{description} approaching! {name} joins the battle!]"
@@ -523,25 +561,27 @@ class SakuraiBot:
                 .format(description=new_char.description,
                         name=new_char.name,
                         url=SMASH_CHARACTER_PAGE.format(new_char.char_id)))
-        else:
-            new_char_text = ''
 
-        if post_details.extra_author is not None:
-            bonus_post = "**Extra {author} post in Miiverse's comments!**" \
-                         "  \n>{text}" \
-                .format(author=post_details.extra_author,
-                        text=post_details.extra_comment)
-            if post_details.extra_picture is not None:
-                bonus_post += "\n\n[Extra picture]({})" \
-                    .format(post_details.extra_picture)
-        else:
-            bonus_post = ''
+        bonus_posts = ''
+        previous_author = ''
+        for extra_post in post_details.extra_posts:
+            extra_text = extra_post.text.replace("\r\n", "  \n")
+            if extra_post.author != previous_author:
+                bonus_posts +=\
+                    "**Extra {author} post in Miiverse's comments!**  \n" \
+                    .format(author=extra_post.author)
+            bonus_posts += ">{text}".format(text=extra_text)
+            if extra_post.picture:
+                bonus_posts += "\n\n[Extra picture]({})\n\n" \
+                    .format(extra_post.picture)
+            previous_author = extra_post.author
 
         comment = comment.format(full_text=full_text,
+                                 website_give_up_text=website_give_up_text,
                                  original_picture=original_picture,
                                  album_link=album_link,
                                  miiverse_links=miiverse_links,
-                                 bonus_post=bonus_post,
+                                 bonus_posts=bonus_posts,
                                  extra_comment=extra_comment,
                                  new_char=new_char_text)
         comment = comment.strip()
@@ -572,6 +612,7 @@ class SakuraiBot:
         return submission
 
     def post_to_other_subreddits(self, new_char, rsmashbros_url):
+        """Post new character announcements in other subreddits."""
         r = praw.Reddit(user_agent=USER_AGENT)
         r.login(self.username, config['Passwords']['reddit'])
         self.logger.info("Logged into Reddit.")
@@ -631,34 +672,49 @@ class SakuraiBot:
         self.logger.info("Md5 updated.")
 
     def bot_cycle(self):
+        """Main loop of the bot."""
         self.logger.debug("Entering get_new_miiverse_cookie()")
         miiverse_cookie = self.get_new_miiverse_cookie()
         self.logger.debug("Entering get_miiverse_last_post()")
         post_url = self.get_miiverse_last_post(miiverse_cookie)
 
+        waiting_file = config['Files']['waiting_on_website']
         self.logger.debug("Entering is_new_post()")
         if self.is_new_post(post_url) or self.debug:
-            self.logger.debug("Entering get_current_pic_md5()")
-            current_md5 = self.get_current_pic_md5()
-
-            self.logger.debug("Entering is_website_new() loop")
-            website_loop_retries = 10
-            while not (self.is_website_new(current_md5) or self.debug):
-                website_loop_retries -= 1
-                if website_loop_retries <= 0:
-                    self.logger.warn("Checked website picture 10 times."
-                                     " Breaking out.")
-                    return
-                sleep(int(config['Main']['sleep_on_website_not_new']))
 
             self.logger.debug("Entering get_info_from_post()")
             post_details = self.get_info_from_post(post_url,
                                                    miiverse_cookie)
 
+            website_give_up = False
             if post_details.is_picture_post():
+                self.logger.debug("Entering get_current_pic_md5()")
+                current_md5 = self.get_current_pic_md5()
+
+                self.logger.debug("Entering is_website_new() loop")
+                website_tries = int(config['Main']['website_not_new_tries'])
+                website_loop_retries = website_tries
+
+                while not self.is_website_new(current_md5) and not self.debug:
+                    website_loop_retries -= 1
+                    current_md5 = self.get_current_pic_md5()
+                    if website_loop_retries <= 0:
+                        self.logger.warn("Checked website picture {} times."
+                                         " Giving up.".format(website_tries))
+                        website_give_up = True
+                        # Create a flag to keep checking for the website pic
+                        open(waiting_file, 'a').close()
+                        self.logger.warn("Created waiting_on_website.")
+                        break
+                    sleep(int(config['Main']['sleep_on_website_not_new']))
+
                 self.logger.debug("Entering upload_to_imgur()")
                 post_details.smashbros_pic = \
-                    self.upload_to_imgur(post_details)
+                    self.upload_to_imgur(post_details, website_give_up)
+
+                if not self.debug:
+                    self.logger.debug("Entering update_md5()")
+                    self.update_md5(current_md5)
 
             self.logger.debug("Entering get_new_char()")
             new_char = self.get_new_char()
@@ -667,17 +723,26 @@ class SakuraiBot:
 
             self.logger.debug("Entering post_to_reddit()")
             reddit_url = self.post_to_reddit(post_details, new_char,
-                                             post_url, post_url_jp).short_link
+                                             post_url, post_url_jp,
+                                             website_give_up).short_link
 
             if not self.debug:
                 self.logger.debug("Entering set_last_post()")
                 self.set_last_post(post_url)
                 if new_char:
+                    self.logger.debug("Entering post_to_other_subreddits()")
+                    self.post_to_other_subreddits(new_char, reddit_url)
                     self.logger.debug("Entering set_last_char()")
                     self.set_last_char(new_char.char_id)
+
+        # If the previous post did not get a website pic,
+        # we don't want to think the new website pic is for the next post.
+        # We need to update it ASAP.
+        elif os.path.isfile(waiting_file):
+            self.logger.debug("Entering get_current_pic_md5()")
+            current_md5 = self.get_current_pic_md5()
+            if self.is_website_new(current_md5):
+                self.logger.info("MD5 from last post was found.")
                 self.logger.debug("Entering update_md5()")
                 self.update_md5(current_md5)
-
-            if new_char and not self.debug:
-                self.logger.debug("Entering post_to_other_subreddits()")
-                self.post_to_other_subreddits(new_char, reddit_url)
+                os.remove(waiting_file)
