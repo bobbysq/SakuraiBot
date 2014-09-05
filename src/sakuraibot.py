@@ -9,6 +9,7 @@ Author: Wiwiweb
 """
 
 from base64 import b64encode
+import collections
 from configparser import ConfigParser
 from datetime import datetime
 import hashlib
@@ -17,12 +18,12 @@ import os
 from random import randint
 import re
 from time import sleep
-
+from uuid import uuid4
 
 from bs4 import BeautifulSoup
 import praw
 import requests
-from uuid import uuid4
+
 
 CONFIG_FILE = "../cfg/config.ini"
 CONFIG_FILE_PRIVATE = "../cfg/config-private.ini"
@@ -42,8 +43,9 @@ MIIVERSE_DEV_PAGE = "/titles/14866558073037299863/14866558073037300685"
 MIIVERSE_DEV_PAGE_JP = "/titles/14866558073037273112/14866558073037275469"
 NINTENDO_LOGIN_PAGE = "https://id.nintendo.net/oauth/authorize"
 SMASH_WEBPAGE = "http://www.smashbros.com/en-uk/"
+SMASH_NEWS_PAGE = "http://www.smashbros.com/data/en-uk/news.json"
 SMASH_CHARACTER_PAGE = "http://www.smashbros.com/en-uk/characters/{}.html"
-SMASH_DAILY_PIC = "http://www.smashbros.com/update/images/daily.jpg"
+SMASH_DAILY_PIC = "http://www.smashbros.com/update/images/daily-en.jpg"
 IMGUR_UPLOAD_URL = "https://api.imgur.com/3/image"
 IMGUR_REFRESH_URL = "https://api.imgur.com/oauth2/token"
 IMGUR_SIGNIN_URL = "https://imgur.com/signin"
@@ -87,18 +89,14 @@ class PostDetails:
         return self.video is not None
 
 
+# Cannot be a namedtuple because it must stay mutable when uploading to imgur
 class ExtraPost:
     def __init__(self, author, text, picture):
         self.author = author
         self.text = text
         self.picture = picture
 
-
-class CharDetails:
-    def __init__(self, char_id, name, description):
-        self.char_id = char_id
-        self.name = name
-        self.description = description
+CharDetails = collections.namedtuple('CharDetails', 'char_id name description')
 
 
 class SakuraiBot:
@@ -127,7 +125,10 @@ class SakuraiBot:
                       'username': config['Miiverse']['username'],
                       'password': config['Passwords']['miiverse']}
         self.logger.debug("Parameters: " + str(parameters))
-        req = requests.post(NINTENDO_LOGIN_PAGE, data=parameters)
+        # For some reason the nintendo id certificate fails now
+        # It works fine in my browser but python and curl don't like it
+        # I'll bypass the verification for now
+        req = requests.post(NINTENDO_LOGIN_PAGE, data=parameters, verify=False)
         if len(req.history) < 2:
             self.logger.debug("Page: " + req.text)
             raise Exception("Couldn't retrieve miiverse cookie.")
@@ -204,24 +205,27 @@ class SakuraiBot:
             return True
 
     def get_new_char(self):
-        f = open(self.last_char_filename, 'r')
-        last_char = f.read().strip()
-        f.close()
-        req = requests.get(SMASH_WEBPAGE)
-        soup = BeautifulSoup(req.text)
-        last_news = soup.find('div', class_='newsBlock'). \
-            find('div', class_='flR').find('a')
-        self.logger.debug("Last news post: " + last_news.string)
-        self.logger.debug("Last news href: " + last_news['href'])
+        req = requests.get(SMASH_NEWS_PAGE)
+        news = req.json()['news']
+        for single_news in news:
+            match = re.match(NEW_CHAR_REGEX, single_news['content'])
+            if match:
+                last_char_news = single_news
+                break
+        else:
+            return None
+        self.logger.debug("Last news post: " + last_char_news['content'])
+        self.logger.debug("Last news href: " + last_char_news['href'])
+        char_id = last_char_news['href'][17:-5]
+        file = open(self.last_char_filename, 'r')
+        last_char = file.read().strip()
+        file.close()
+        self.logger.debug("Char id: " + char_id)
         self.logger.debug("Last char: " + last_char)
-        match = re.match(NEW_CHAR_REGEX,
-                         last_news.string)
-        if match and last_news['href'] != last_char:
+        if char_id != last_char:
             # We've got a new char, get info
-            self.logger.info("New character announced!")
-            char_id = last_news['href'][11:-5]
-            self.logger.debug("Char id: " + char_id)
             char_name = match.group(2)
+            self.logger.info("New character announced!")
             self.logger.info("Char name: " + char_name)
             if re.search(r'veteran', match.group(1)):
                 char_description = 'Veteran fighter'
@@ -229,8 +233,7 @@ class SakuraiBot:
                 char_description = 'New challenger'
             self.logger.debug("Char description: " + char_description)
             return CharDetails(char_id, char_name, char_description)
-        else:
-            return None
+        return None
 
     def get_info_from_post(self, post_url, miiverse_cookie):
         """Fetch author, text and picture URL from the post."""
@@ -325,7 +328,13 @@ class SakuraiBot:
                 self.logger.debug("Token request parameters: "
                                   + str(parameters))
                 req = requests.post(IMGUR_REFRESH_URL, data=parameters)
-                imgur_access_token = req.json()['access_token']
+                try:
+                    imgur_access_token = req.json()['access_token']
+                except KeyError as e:
+                    self.logger.error(
+                        "ERROR: Couldn't retrieve imgur access token.")
+                    self.logger.error("JSON: " + str(req.json()))
+                    raise e
                 break
             except requests.HTTPError as e:
                 retries -= 1
@@ -339,28 +348,49 @@ class SakuraiBot:
                     sleep(2)
                     continue
 
+        # Get previous album order
+        headers = {'Authorization': 'Bearer ' + imgur_access_token}
+        req = requests.get(IMGUR_ALBUM_IMAGES_URL.format(self.imgur_album),
+                           headers=headers)
+        album_order = ''
+        for img in req.json()['data']:
+            album_order += img['id'] + ','
+        album_order = album_order[:-1]
+        self.logger.debug('Old album order: ' + album_order)
+        new_img_ids = ''
+
         # Upload picture
+        title = post_details.text
+        description = ''
+        if len(title) > IMGUR_TITLE_LIMIT:
+            too_long = ' [...]'
+            allowed_text_length = IMGUR_TITLE_LIMIT - len(too_long)
+            while len(title) > allowed_text_length:
+                title = title.rsplit(' ', 1)[0]  # Remove last word
+            title += too_long
+            description = post_details.text
+        # HTTPError retry loop
         while True:
             try:
-                title = post_details.text
-                description = ''
-                if len(title) > IMGUR_TITLE_LIMIT:
-                    too_long = ' [...]'
-                    allowed_text_length = IMGUR_TITLE_LIMIT - len(too_long)
-                    while len(title) > allowed_text_length:
-                        title = title.rsplit(' ', 1)[0]  # Remove last word
-                    title += too_long
-                    description = post_details.text
                 parameters = {'image': pic_base64,
                               'title': title,
-                              'album_id': self.imgur_album,
                               'description': description,
+                              'album_id': self.imgur_album,
                               'type': 'base64'}
+                self.logger.debug("Image upload parameters: "
+                                  + str(parameters))
                 headers = {'Authorization': 'Bearer ' + imgur_access_token}
                 req = requests.post(IMGUR_UPLOAD_URL, data=parameters,
                                     headers=headers)
 
-                picture_url = req.json()['data']['link']
+                try:
+                    picture_url = req.json()['data']['link']
+                except KeyError as e:
+                    self.logger.error("ERROR: JSON key error "
+                                      "during image upload")
+                    self.logger.error("JSON: " + str(req.json()))
+                    raise e
+                new_img_ids = picture_url[-11:-4]
                 self.logger.info("Uploaded to imgur! " + picture_url)
                 break
             except requests.HTTPError as e:
@@ -373,6 +403,60 @@ class SakuraiBot:
                         ". Retrying.")
                     sleep(2)
                     continue
+
+        # Upload extra pictures if there's any
+        for extra_post in post_details.extra_posts:
+            if extra_post.picture:
+                title = extra_post.text
+                description = ''
+                if len(title) > IMGUR_TITLE_LIMIT:
+                    too_long = ' [...]'
+                    allowed_text_length = IMGUR_TITLE_LIMIT - len(too_long)
+                    while len(title) > allowed_text_length:
+                        title = title.rsplit(' ', 1)[0]  # Remove last word
+                    title += too_long
+                    description = extra_post.text
+                # HTTPError retry loop
+                while True:
+                    try:
+                        parameters = {'image': extra_post.picture,
+                                      'title': title,
+                                      'description': description,
+                                      'album_id': self.imgur_album,
+                                      'type': 'URL'}
+                        self.logger.debug("Extra image upload parameters: "
+                                          + str(parameters))
+                        headers = {'Authorization': 'Bearer ' +
+                                                    imgur_access_token}
+                        req = requests.post(IMGUR_UPLOAD_URL, data=parameters,
+                                            headers=headers)
+
+                        try:
+                            extra_picture_url = req.json()['data']['link']
+                        except KeyError as e:
+                            self.logger.error("ERROR: JSON key error "
+                                              "during extra image upload")
+                            self.logger.error("JSON: " + str(req.json()))
+                            raise e
+                        new_img_ids = \
+                            extra_picture_url[-11:-4] + ',' + new_img_ids
+                        extra_post.picture = extra_picture_url
+                        self.logger.info("Uploaded to imgur! " +
+                                         extra_picture_url)
+                        break
+                    except requests.HTTPError as e:
+                        retries -= 1
+                        if retries == 0:
+                            raise e
+                        else:
+                            self.logger.error(
+                                "ERROR: HTTPError: " +
+                                str(e.response.status_code) +
+                                ". Retrying.")
+                            sleep(2)
+                            continue
+
+        self.logger.info("New image ids: " + new_img_ids)
 
         # Rearrange newest picture to be first of the album
         # No API call for this...
@@ -391,26 +475,16 @@ class SakuraiBot:
         imgur_cookie = req.cookies.get('IMGURSESSION')
 
         if imgur_cookie is None:
-            self.logger.debug("Page: " + req.text)
             self.logger.error("ERROR: Couldn't retrieve Imgur cookie.")
+            self.logger.error("Page: " + req.text)
         else:
             self.logger.debug("imgur_cookie: " + imgur_cookie)
-
-            # Get all image ids
-            headers = {'Authorization': 'Bearer ' + imgur_access_token}
-            req = requests.get(IMGUR_ALBUM_IMAGES_URL.format(self.imgur_album),
-                               headers=headers)
-            new_img_id = picture_url[-11:-4]
-            album_order = new_img_id + ','
-            for img in req.json()['data']:
-                if img['id'] != new_img_id:
-                    album_order += img['id'] + ','
-            album_order = album_order[:-1]
-            self.logger.debug('album_order: ' + album_order)
+            new_album_order = new_img_ids + ',' + album_order
+            self.logger.debug("New album order: " + new_album_order)
 
             # Use cookie to rearrange album
             cookies = {'IMGURSESSION': imgur_cookie}
-            parameters = {'order': album_order}
+            parameters = {'order': new_album_order}
             self.logger.debug("Parameters: " + str(parameters))
             req = requests.post(
                 IMGUR_REARRANGE_URL.format(self.imgur_album), data=parameters,
@@ -527,7 +601,7 @@ class SakuraiBot:
                 ("The Smash Bros website did not update in time, "
                  "so today's link is the lower-quality Miiverse picture. "
                  "The high quality picture will eventually appear "
-                 "[here.](http://www.smashbros.com/update/images/daily.jpg)")
+                 "[here.]({})".format(SMASH_DAILY_PIC))
 
         original_picture = ''
         if post_details.picture:
@@ -660,7 +734,7 @@ class SakuraiBot:
     def set_last_char(self, new_char_id):
         """Add the char id to the last-char.txt file."""
         postf = open(self.last_char_filename, 'w')
-        postf.write('characters/' + new_char_id + '.html')
+        postf.write(new_char_id)
         postf.close()
         self.logger.info("New char remembered.")
 

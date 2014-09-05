@@ -13,6 +13,7 @@ from datetime import datetime
 from filecmp import cmp
 import logging
 from os import remove
+import re
 from shutil import copy
 import sys
 
@@ -36,10 +37,11 @@ LAST_POST_FILENAME = 'last-post.txt'
 EXTRA_COMMENT_FILENAME = '../res/extra-comment.txt'
 PICTURE_MD5_FILENAME = 'last-picture-md5.txt'
 LAST_CHAR_FILENAME = 'last-char.txt'
-IMGUR_CLIENT_ID = '45b2e3810d7d550'
 
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG,
                     format='%(asctime)s: %(message)s')
+
+imgur_client_id = config['Imgur']['client_id']
 
 unicode_text = ' No \u0CA0_\u0CA0 ;' \
                ' Yes \u0CA0\u203F\u0CA0 \u2026'
@@ -85,8 +87,8 @@ class BasicTests(unittest.TestCase):
 
     def test_get_current_pic_md5(self):
         md5 = self.sbot.get_current_pic_md5()
-        self.assertRegexpMatches(md5, r'([a-fA-F\d]{32})',
-                                 "Malformed md5: " + md5)
+        self.assertRegex(md5, r'([a-fA-F\d]{32})',
+                         "Malformed md5: " + md5)
 
     def test_is_website_new_yes(self):
         md5 = '3c0cb77a45b1215d9d4ef6cda0d89959'
@@ -98,8 +100,8 @@ class BasicTests(unittest.TestCase):
 
     def test_get_new_char(self):
         new_char = self.sbot.get_new_char()
-        self.assertRegex(new_char.char_id, r'[a-z_]+')
-        self.assertRegex(new_char.name, r'[a-zA-Z ]+')
+        self.assertTrue(re.match(r'[a-z_-]+', new_char.char_id))
+        self.assertTrue(re.match(r'[a-zA-Z -]+', new_char.name))
         self.assertTrue(new_char.description == 'New challenger' or
                         new_char.description == 'Veteran fighter')
 
@@ -292,7 +294,7 @@ class ImgurTests(unittest.TestCase):
         picture_url = self.sbot.upload_to_imgur(post_details)
         picture_id = picture_url[-11:-4]
 
-        headers = {'Authorization': 'Client-ID ' + IMGUR_CLIENT_ID}
+        headers = {'Authorization': 'Client-ID ' + imgur_client_id}
         req = requests.get('https://api.imgur.com/3/image/' + picture_id,
                            headers=headers)
         logging.debug("Image Json Response: " + req.text)
@@ -303,7 +305,7 @@ class ImgurTests(unittest.TestCase):
         description_json = req.json()['data']['description']
         self.assertIsNone(description_json)
 
-        headers = {'Authorization': 'Client-ID ' + IMGUR_CLIENT_ID}
+        headers = {'Authorization': 'Client-ID ' + imgur_client_id}
         req = requests.get('https://api.imgur.com/3/album/' +
                            config['Imgur']['test_album_id'],
                            headers=headers)
@@ -321,7 +323,7 @@ class ImgurTests(unittest.TestCase):
         picture_url = self.sbot.upload_to_imgur(post_details)
         picture_id = picture_url[19:-4]
 
-        headers = {'Authorization': 'Client-ID ' + IMGUR_CLIENT_ID}
+        headers = {'Authorization': 'Client-ID ' + imgur_client_id}
         req = requests.get('https://api.imgur.com/3/image/' + picture_id,
                            headers=headers)
         logging.debug("Image Json Response: " + req.text)
@@ -332,6 +334,51 @@ class ImgurTests(unittest.TestCase):
         self.assertEqual(alt_title, title_json)
         description_json = req.json()['data']['description']
         self.assertEqual(unique_text, description_json)
+
+    def test_upload_to_imgur_extra_pictures(self):
+        unique_text = str(uuid4()) + unicode_text + long_text
+        extra_text1 = "ExtraPic1 " + str(uuid4())
+        extra_text2 = "ExtraPic2 " + str(uuid4())
+        extra_text3 = "ExtraPic3 " + str(uuid4())
+        extra_picture1 = \
+            'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzSKwan8kYb6zyf'
+        extra_picture2 = \
+            'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzSKwa6YCEBWvAZ'
+        extra_picture3 = \
+            'https://d3esbfg30x759i.cloudfront.net/ss/zlCfzSKwbEI1Fr6F_j'
+
+        extra_post1 = ExtraPost('Sakurai', extra_text1, extra_picture1)
+        extra_post2 = ExtraPost('Sakurai', extra_text2, extra_picture2)
+        extra_post3 = ExtraPost('Sakurai', extra_text3, extra_picture3)
+
+        extra_posts = [extra_post1, extra_post2, extra_post3]
+
+        post_details = sakuraibot.PostDetails('Pug', unique_text,
+                                              self.picture, None, None,
+                                              extra_posts)
+
+        picture_url = self.sbot.upload_to_imgur(post_details)
+        picture_id = picture_url[19:-4]
+
+        headers = {'Authorization': 'Client-ID ' + imgur_client_id}
+        req = requests.get('https://api.imgur.com/3/image/' + picture_id,
+                           headers=headers)
+        logging.debug("Image Json Response: " + req.text)
+        id_json = req.json()['data']['id']
+        self.assertEqual(picture_id, id_json)
+        title_json = req.json()['data']['title']
+        alt_title = unique_text.rsplit(' ', 35)[0] + ' [...]'
+        self.assertEqual(alt_title, title_json)
+        description_json = req.json()['data']['description']
+        self.assertEqual(unique_text, description_json)
+        album_req_url = 'https://api.imgur.com/3/album/{}/images'\
+            .format(self.sbot.imgur_album)
+        req = requests.get(album_req_url, headers=headers)
+        data = req.json()['data']
+        self.assertEqual(data[0]['title'], extra_text3)
+        self.assertEqual(data[1]['title'], extra_text2)
+        self.assertEqual(data[2]['title'], extra_text1)
+        self.assertEqual(data[3]['description'], unique_text)
 
 
 class RedditTests(unittest.TestCase):
